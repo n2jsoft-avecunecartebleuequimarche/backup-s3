@@ -16,7 +16,7 @@ class SQS:
         try:
             self.get_queue_attributes()
         except botocore.exceptions.ClientError as e:
-            logger.error("Failed to get queue attributes:", e)
+            logger.error("Init failed to get queue attributes:", e)
             sys.exit(1)
         self.__max_number_of_messages = os.getenv("MAX_NUMBER_OF_MESSAGES", 10)
         self.__wait_time_seconds = os.getenv("WAIT_TIME_SECONDS", 20)

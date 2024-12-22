@@ -7,6 +7,7 @@ from .s3 import S3
 from .log import logger
 from .graceful_killer import GracefulKiller
 from prometheus_client import start_http_server, Counter, Gauge, Histogram
+from concurrent.futures import ThreadPoolExecutor
 
 class App:
 
@@ -14,6 +15,7 @@ class App:
         self.__download_path = os.getenv("DOWNLOAD_PATH", "/download")
         self.__metadata_path = os.getenv("METADATA_PATH", "/metadata")
         self.__max_retries = int(os.getenv("MAX_RETRIES", 3))
+        self.max_workers = int(os.getenv("MAX_WORKERS", 5))
 
         self.__aws = AWSClient()
         self.__sqs = SQS(self.__aws.session, self.__aws.endpoint_url)
@@ -34,35 +36,45 @@ class App:
     def _process_sqs_messages(self):
         logger.info("Listening for messages in batches...")
         killer = GracefulKiller()
-        while True:
-            if killer.kill_now:
-                break
-            try:
-                # Update the number of messages in the queue
-                self.__metrics['MessagesWaiting'].set(self.__sqs.get_queue_attributes())
 
-                # Receive messages in a batch (long polling)
-                response = self.__sqs.get_messages()
+        # Thread pool for parallel message processing
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            while True:
+                if killer.kill_now:
+                    break
+                try:
+                    # Update the number of messages in the queue
+                    self.__metrics['MessagesWaiting'].set(self.__sqs.get_queue_attributes())
 
-                if 'Messages' not in response:
-                    logger.info("No messages received. Waiting...")
-                    continue
+                    # Receive messages in a batch (long polling)
+                    response = self.__sqs.get_messages()
 
-                logger.debug(f"Received {len(response['Messages'])} messages.")
+                    if 'Messages' not in response:
+                        logger.info("No messages received. Waiting...")
+                        continue
 
-                for message in response['Messages']:
-                    process_start = time.time()
-                    try:
-                        self._process_message(message)
-                    except Exception as e:
-                        self.__metrics['FailedMessages'].inc()
-                        logger.error("Failed to process message:", e)
+                    logger.debug(f"Received {len(response['Messages'])} messages.")
 
-                    processing_time = time.time() - process_start
-                    self.__metrics['MessagesProcessingTime'].observe(processing_time)
+                    # Submit tasks to process messages in parallel
+                    futures = {
+                        executor.submit(self._process_message, message): message
+                        for message in response['Messages']
+                    }
 
-            except Exception as e:
-                logger.error("Error receiving messages:", e)
+                    for future in as_completed(futures):
+                        message = futures[future]
+                        process_start = time.time()
+                        try:
+                            future.result()  # Wait for the task to complete
+                        except Exception as e:
+                            self.__metrics['FailedMessages'].inc()
+                            logger.error(f"Failed to process message {message}: {e}")
+                        finally:
+                            processing_time = time.time() - process_start
+                            self.__metrics['MessagesProcessingTime'].observe(processing_time)
+
+                except Exception as e:
+                    logger.error("Error receiving messages:", e)
 
     def _process_message(self, message):
         """Process a single SQS message."""
