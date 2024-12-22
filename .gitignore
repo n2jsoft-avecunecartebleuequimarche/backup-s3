@@ -1,0 +1,6 @@
+.venv
+**/__pycache__
+s3/*
+!s3/.gitkeep
+fictures/*
+!fictures/.gitkeep
